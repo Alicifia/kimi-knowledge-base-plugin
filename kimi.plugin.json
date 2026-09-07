@@ -1,15 +1,15 @@
 {
   "$schema": "https://catalog.msh.team/misc/kimi.plugin.schema.json",
   "name": "knowledge-base",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "把任意本地文件夹变成可检索的知识库：文档导入、向量检索、持久化存储、多文档关联，全部离线本地运行",
-  "keywords": ["knowledge-base", "vector-search", "local-first", "ebook", "offline"],
+  "keywords": [],
   "author": "Alicifia",
   "license": "MIT",
   "skillInstructions": "",
   "interface": {
     "displayName": "本地知识库",
-    "shortDescription": "把本地文件夹变成可检索的知识库",
+    "shortDescription": "在 Kimi 里使用 本地知识库",
     "longDescription": "把任意本地文件夹变成可检索的知识库：文档导入、向量检索、持久化存储、多文档关联，全部离线本地运行",
     "developerName": "Alicifia",
     "websiteURL": "https://github.com/Alicifia/kimi-knowledge-base-plugin",
