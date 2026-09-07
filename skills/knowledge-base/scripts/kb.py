@@ -170,7 +170,7 @@ def open_db(root: Path) -> sqlite3.Connection:
 # ---------------------------------------------------------------- 分词 / 向量化
 
 _WORD_RE = re.compile(r"[a-z0-9_]+")
-_CJK_RUN_RE = re.compile(r"[一-鿿㐀-䶿豈-﫿]+")
+_CJK_RUN_RE = re.compile(r"[\u4e00-\u9fff\u3400-\u4dbf\uf900-\ufaff]+")
 
 
 def tokenize(text: str):
