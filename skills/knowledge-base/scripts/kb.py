@@ -1,27 +1,26 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-#
-#  kimi-knowledge-base-plugin — 本地知识库引擎
-#  Copyright (c) 2026 Alicifia (https://github.com/Alicifia)
-#  Licensed under the MIT License. See LICENSE file in the project root
-#  for the full license text. 保留版权与许可声明。
-#
-"""本地知识库引擎（kb.py）
+"""本地知识库引擎（kb.py）v0.2.0
 
 零第三方依赖（仅 Python 标准库），完全离线运行。
 
 功能：
-  - init / use   指定并切换知识库本地目录
-  - add          导入文档（.md/.markdown/.txt/.epub/.mobi/.azw3，可选 .docx/.pdf）
-  - search       向量检索（两级：文档级向量预筛 → 块级向量精排，余弦相似度）
-  - related      多文档关联（显式 [[wikilink]]/markdown 链接 + 文档级向量相似）
+  - init / use      指定并切换知识库本地目录（自动登记进注册表）
+  - libraries       列出注册表里的全部知识库
+  - forget          从注册表注销某个知识库（不删除任何文件）
+  - add             导入文档（.md/.markdown/.txt/.epub/.mobi/.azw3，可选 .docx/.pdf）
+  - search          向量检索（两级：文档级向量预筛 → 块级向量精排，余弦相似度）
+                    --all 跨注册表内全部知识库统一检索，结果合并排序
+  - related         多文档关联（显式 [[wikilink]]/markdown 链接 + 文档级向量相似）
   - list / remove / status / reindex
 
-存储：知识库根目录下的 .knowledge-base/index.sqlite（文档、块、TF/向量、链接边）。
-全局配置（当前激活的知识库）：~/.kimi-work/knowledge-base.json
+存储：知识库根目录下的 .knowledge-base/index.sqlite（文档、块、TF/向量、链接边），
+每个知识库自包含，互不影响。
+全局注册表（全部已登记知识库 + 当前激活库）：~/.kimi-work/knowledge-base.json
 """
 
 import argparse
+import datetime
 import hashlib
 import html as html_mod
 import json
@@ -68,6 +67,52 @@ def load_config():
 def save_config(cfg):
     CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
     CONFIG_PATH.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+# ---------------------------------------------------------------- 知识库注册表
+
+
+def load_registry():
+    """读全局配置并保证 libraries 注册表存在；兼容旧版只有 active_root 的配置，
+    自动把旧激活库收编进注册表。"""
+    cfg = load_config()
+    libs = cfg.get("libraries")
+    if not isinstance(libs, list):
+        libs = []
+    active = cfg.get("active_root")
+    known = {l.get("root") for l in libs if l.get("root")}
+    if active and active not in known:
+        libs.append({"name": Path(active).name or active, "root": active,
+                     "added": datetime.date.today().isoformat()})
+        cfg["libraries"] = libs
+        save_config(cfg)
+    cfg["libraries"] = libs
+    return cfg
+
+
+def register_library(root: Path, name=None):
+    """把知识库登记进注册表并设为当前激活库；重复登记只更新激活状态。"""
+    cfg = load_registry()
+    root_s = str(root)
+    entry = next((l for l in cfg["libraries"] if l["root"] == root_s), None)
+    if entry is None:
+        entry = {"name": name or root.name or root_s, "root": root_s,
+                 "added": datetime.date.today().isoformat()}
+        cfg["libraries"].append(entry)
+    elif name:
+        entry["name"] = name
+    cfg["active_root"] = root_s
+    save_config(cfg)
+    return entry
+
+
+def resolve_library(name_or_root: str):
+    """按注册表名称或目录路径找知识库根目录，找不到返回 None。"""
+    for l in load_registry()["libraries"]:
+        if l["name"] == name_or_root or l["root"] == name_or_root:
+            return Path(l["root"])
+    p = Path(name_or_root).expanduser()
+    return p.resolve() if p.exists() else None
 
 
 def require_root(args):
@@ -125,7 +170,7 @@ def open_db(root: Path) -> sqlite3.Connection:
 # ---------------------------------------------------------------- 分词 / 向量化
 
 _WORD_RE = re.compile(r"[a-z0-9_]+")
-_CJK_RUN_RE = re.compile(r"[一-鿿㐀-䶿\uf900-\ufaff]+")
+_CJK_RUN_RE = re.compile(r"[一-鿿㐀-䶿豈-﫿]+")
 
 
 def tokenize(text: str):
@@ -506,22 +551,21 @@ def cmd_init(args):
     root.mkdir(parents=True, exist_ok=True)
     conn = open_db(root)
     conn.close()
-    cfg = load_config()
-    cfg["active_root"] = str(root)
-    save_config(cfg)
+    entry = register_library(root, name=args.name)
     print(f"OK: 知识库已就绪 -> {root}")
+    print(f"已登记进注册表：{entry['name']}（共 {len(load_registry()['libraries'])} 个库）")
     print(f"索引位置 -> {root / INDEX_DIRNAME / 'index.sqlite'}")
     print("下一步：kb.py add <文件或目录> 导入文档")
 
 
 def cmd_use(args):
-    root = Path(args.root).expanduser().resolve()
+    root = resolve_library(args.root)
+    if root is None:
+        die(f"找不到知识库：{args.root}（既不是注册表里的名称，也不是存在的目录）")
     if not (root / INDEX_DIRNAME / "index.sqlite").exists():
         die(f"{root} 还不是知识库（缺少索引）。先运行：kb.py init --root \"{root}\"")
-    cfg = load_config()
-    cfg["active_root"] = str(root)
-    save_config(cfg)
-    print(f"OK: 已切换到知识库 -> {root}")
+    entry = register_library(root)
+    print(f"OK: 已切换到知识库 -> {entry['name']}（{root}）")
 
 
 def cmd_add(args):
@@ -585,63 +629,102 @@ def _idf_map(conn):
     return {t: math.log((1 + n) / (1 + d)) + 1.0 for t, d in df.items()}, n
 
 
+def search_root(root: Path, query: str, top: int, per_doc: bool):
+    """对单个知识库执行两级向量检索，返回 hit 列表。"""
+    conn = open_db(root)
+    try:
+        idf, n = _idf_map(conn)
+        if n == 0:
+            return []
+        qvec = tfidf_vector(tf_counter(tokenize(query)), idf)
+        if not qvec:
+            return []
+
+        # 第一级：文档级向量预筛
+        doc_scores = []
+        for doc_id, vec_blob in conn.execute("SELECT id, vec FROM docs WHERE vec IS NOT NULL"):
+            s = cosine(qvec, load_vec(vec_blob))
+            if s > 0:
+                doc_scores.append((s, doc_id))
+        doc_scores.sort(key=lambda x: -x[0])
+        top_docs = doc_scores[:DOC_PREFILTER]
+        if not top_docs:
+            return []
+        doc_score_map = {doc_id: s for s, doc_id in top_docs}
+        placeholders = ",".join("?" * len(top_docs))
+
+        # 第二级：候选文档内块级精排（块向量由 TF 按需现算）
+        scored = []
+        for cid, doc_id, heading, content, tf_blob in conn.execute(
+                f"SELECT id, doc_id, heading, content, tf FROM chunks WHERE doc_id IN ({placeholders})",
+                tuple(doc_score_map)):
+            s = cosine(qvec, tfidf_vector(load_vec(tf_blob), idf))
+            if s > 0:
+                scored.append((s, cid, doc_id, heading, content))
+        scored.sort(key=lambda x: -x[0])
+
+        seen_docs = {}
+        out = []
+        for s, cid, doc_id, heading, content in scored:
+            if per_doc and doc_id in seen_docs:
+                continue
+            seen_docs[doc_id] = True
+            path, title = conn.execute("SELECT path, title FROM docs WHERE id=?", (doc_id,)).fetchone()
+            out.append({
+                "score": round(s, 4),
+                "doc_score": round(doc_score_map[doc_id], 4),
+                "path": str(root / path),
+                "rel_path": path,
+                "title": title,
+                "heading": heading or "",
+                "snippet": " ".join(content.split())[:220],
+            })
+            if len(out) >= top:
+                break
+        return out
+    finally:
+        conn.close()
+
+
 def cmd_search(args):
+    if args.all:
+        cfg = load_registry()
+        libs = cfg.get("libraries", [])
+        if not libs:
+            die("注册表为空。先运行：kb.py init --root <目录>")
+        hits = []
+        searched = []
+        for l in libs:
+            root = Path(l["root"])
+            if not root.exists():
+                print(f"WARN: 知识库目录不存在，跳过：{l['name']}（{l['root']}）", file=sys.stderr)
+                continue
+            if not (root / INDEX_DIRNAME / "index.sqlite").exists():
+                print(f"WARN: 知识库未建索引，跳过：{l['name']}（{l['root']}）", file=sys.stderr)
+                continue
+            searched.append(l["name"])
+            for h in search_root(root, args.query, args.top, args.per_doc):
+                h["kb"] = l["name"]
+                h["kb_root"] = l["root"]
+                hits.append(h)
+        hits.sort(key=lambda h: -h["score"])
+        print(json.dumps({
+            "query": args.query, "scope": "all",
+            "libraries_searched": searched, "hits": hits[:args.top],
+        }, ensure_ascii=False, indent=2))
+        return
+
     root = require_root(args)
     conn = open_db(root)
-    idf, n = _idf_map(conn)
+    n = conn.execute("SELECT COUNT(*) FROM chunks").fetchone()[0]
+    conn.close()
     if n == 0:
         die("知识库是空的。先运行：kb.py add <文件或目录>")
-    qvec = tfidf_vector(tf_counter(tokenize(args.query)), idf)
-    if not qvec:
+    if not tf_counter(tokenize(args.query)):
         die("查询分词后为空，换个说法试试。")
-
-    # 第一级：文档级向量预筛
-    doc_scores = []
-    for doc_id, vec_blob in conn.execute("SELECT id, vec FROM docs WHERE vec IS NOT NULL"):
-        s = cosine(qvec, load_vec(vec_blob))
-        if s > 0:
-            doc_scores.append((s, doc_id))
-    doc_scores.sort(key=lambda x: -x[0])
-    top_docs = doc_scores[:DOC_PREFILTER]
-    if not top_docs:
-        print(json.dumps({"kb_root": str(root), "query": args.query, "hits": []},
-                         ensure_ascii=False, indent=2))
-        conn.close()
-        return
-    doc_score_map = {doc_id: s for s, doc_id in top_docs}
-    placeholders = ",".join("?" * len(top_docs))
-
-    # 第二级：候选文档内块级精排（块向量由 TF 按需现算）
-    scored = []
-    for cid, doc_id, heading, content, tf_blob in conn.execute(
-            f"SELECT id, doc_id, heading, content, tf FROM chunks WHERE doc_id IN ({placeholders})",
-            tuple(doc_score_map)):
-        s = cosine(qvec, tfidf_vector(load_vec(tf_blob), idf))
-        if s > 0:
-            scored.append((s, cid, doc_id, heading, content))
-    scored.sort(key=lambda x: -x[0])
-
-    seen_docs = {}
-    out = []
-    for s, cid, doc_id, heading, content in scored:
-        if args.per_doc and doc_id in seen_docs:
-            continue
-        seen_docs[doc_id] = True
-        path, title = conn.execute("SELECT path, title FROM docs WHERE id=?", (doc_id,)).fetchone()
-        out.append({
-            "score": round(s, 4),
-            "doc_score": round(doc_score_map[doc_id], 4),
-            "path": str(root / path),
-            "rel_path": path,
-            "title": title,
-            "heading": heading or "",
-            "snippet": " ".join(content.split())[:220],
-        })
-        if len(out) >= args.top:
-            break
-    print(json.dumps({"kb_root": str(root), "query": args.query, "hits": out},
+    hits = search_root(root, args.query, args.top, args.per_doc)
+    print(json.dumps({"kb_root": str(root), "query": args.query, "hits": hits},
                      ensure_ascii=False, indent=2))
-    conn.close()
 
 
 def cmd_related(args):
@@ -706,8 +789,9 @@ def cmd_list(args):
 
 
 def cmd_status(args):
-    cfg = load_config()
+    cfg = load_registry()
     root = cfg.get("active_root")
+    libs = cfg.get("libraries", [])
     if not root:
         print("尚未指定知识库目录。运行：kb.py init --root <目录>")
         return
@@ -719,9 +803,66 @@ def cmd_status(args):
     links = conn.execute("SELECT COUNT(*) FROM links").fetchone()[0]
     print(json.dumps({
         "active_root": str(root),
+        "registered_libraries": len(libs),
+        "libraries": [l["name"] for l in libs],
         "docs": docs, "chunks": chunks, "vocab_terms": terms, "links": links,
     }, ensure_ascii=False, indent=2))
     conn.close()
+
+
+def cmd_libraries(args):
+    """列出注册表里的全部知识库及规模，标记当前激活库。"""
+    cfg = load_registry()
+    libs = cfg.get("libraries", [])
+    if not libs:
+        print("注册表为空。运行：kb.py init --root <目录> 登记第一个知识库")
+        return
+    active = cfg.get("active_root")
+    out = []
+    for l in libs:
+        root = Path(l["root"])
+        entry = {"name": l["name"], "root": l["root"],
+                 "active": l["root"] == active, "added": l.get("added", "")}
+        if not root.exists():
+            entry["status"] = "missing"
+        elif not (root / INDEX_DIRNAME / "index.sqlite").exists():
+            entry["status"] = "no-index"
+        else:
+            conn = open_db(root)
+            entry["docs"] = conn.execute("SELECT COUNT(*) FROM docs").fetchone()[0]
+            entry["chunks"] = conn.execute("SELECT COUNT(*) FROM chunks").fetchone()[0]
+            entry["status"] = "ok"
+            conn.close()
+        out.append(entry)
+    print(json.dumps({"libraries": out}, ensure_ascii=False, indent=2))
+
+
+def cmd_forget(args):
+    """从注册表注销知识库；目录、文档和索引文件全部保留在原处。"""
+    cfg = load_registry()
+    libs = cfg.get("libraries", [])
+    target = args.name_or_root
+    p = Path(target).expanduser()
+    try:
+        resolved = str(p.resolve())
+    except Exception:
+        resolved = None
+    kept = [l for l in libs
+            if l["name"] != target and l["root"] != target and l["root"] != resolved]
+    removed = [l for l in libs if l not in kept]
+    if not removed:
+        die(f"注册表里找不到知识库：{target}")
+    cfg["libraries"] = kept
+    if cfg.get("active_root") in [l["root"] for l in removed]:
+        if kept:
+            cfg["active_root"] = kept[-1]["root"]
+        else:
+            cfg.pop("active_root", None)
+    save_config(cfg)
+    for l in removed:
+        print(f"  - 已注销：{l['name']}（{l['root']}）")
+    print("OK: 只移除了登记信息，知识库目录和索引文件都还在原处，"
+          "随时可以用 init --root 重新登记回来")
 
 
 def cmd_reindex(args):
@@ -759,13 +900,21 @@ def main():
     ap = argparse.ArgumentParser(prog="kb.py", description="本地知识库引擎")
     sub = ap.add_subparsers(dest="cmd", required=True)
 
-    p = sub.add_parser("init", help="指定知识库目录并初始化")
+    p = sub.add_parser("init", help="指定知识库目录并初始化（自动登记进注册表）")
     p.add_argument("--root", required=True)
+    p.add_argument("--name", default=None, help="知识库别名，默认用目录名")
     p.set_defaults(fn=cmd_init)
 
-    p = sub.add_parser("use", help="切换当前激活的知识库")
+    p = sub.add_parser("use", help="切换当前激活的知识库（可用注册表名称或目录路径）")
     p.add_argument("--root", required=True)
     p.set_defaults(fn=cmd_use)
+
+    p = sub.add_parser("libraries", help="列出注册表里的全部知识库")
+    p.set_defaults(fn=cmd_libraries)
+
+    p = sub.add_parser("forget", help="从注册表注销知识库（不删除任何文件）")
+    p.add_argument("name_or_root")
+    p.set_defaults(fn=cmd_forget)
 
     p = sub.add_parser("add", help="导入文件或目录")
     p.add_argument("paths", nargs="+")
@@ -779,10 +928,12 @@ def main():
     p.add_argument("--root", default=None)
     p.set_defaults(fn=cmd_remove)
 
-    p = sub.add_parser("search", help="向量检索")
+    p = sub.add_parser("search", help="向量检索（--all 跨全部已登记知识库）")
     p.add_argument("query")
     p.add_argument("--top", type=int, default=8)
     p.add_argument("--per-doc", action="store_true", help="每篇文档只保留最佳块")
+    p.add_argument("--all", action="store_true",
+                   help="跨注册表内全部知识库统一检索，结果合并排序并标注来源库")
     p.add_argument("--root", default=None)
     p.set_defaults(fn=cmd_search)
 
